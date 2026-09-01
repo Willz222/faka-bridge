@@ -1,0 +1,8 @@
+# 必须使用 wrangler secret put 保存到线上，禁止提交真实值。
+ADMIN_PASSWORD=replace-with-a-long-random-password
+ADMIN_USERNAME=admin
+SESSION_SECRET=replace-with-at-least-32-random-characters
+MASTER_KEY=replace-with-at-least-32-random-characters
+
+# 本地调试时 Worker 的公开地址；线上通常可在后台“基本设置”中填写。
+PUBLIC_BASE_URL=http://localhost:8787

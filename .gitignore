@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.openai/
+.dev.vars
+.env
+dist/
+*.log
+*.zip
+release/faka-bridge-worker-v*.txt
+!release/faka-bridge-worker-v0.1.0.txt
+acg-plugin/app/Plugin/NextBridge/Config/Config.php

@@ -1,0 +1,17 @@
+{
+  "name": "faka-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker bridge between ACG-Faka and Dujiao-Next",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "db:local": "npx wrangler d1 migrations apply faka-bridge-db --local",
+    "db:remote": "npx wrangler d1 migrations apply faka-bridge-db --remote",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check worker/index.js && node --test tests/*.test.mjs"
+  },
+  "license": "MIT"
+}
