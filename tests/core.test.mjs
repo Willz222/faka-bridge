@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import worker, { __test } from "../worker/index.js";
 
 test("MD5 matches standard vectors", () => {
@@ -57,6 +58,14 @@ test("embedded admin client is valid JavaScript", () => {
   assert.equal(__test.ADMIN_PAGE.includes('id="catalogBackdrop"'), true);
   assert.equal(__test.ADMIN_PAGE.includes("强制刷新完整商品库"), true);
   assert.equal(__test.ADMIN_PAGE.includes("保存上架选择"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("订单与异常核对"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("导出 CSV"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("待人工核对"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("下载诊断报告"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("已上架商品刷新间隔"), true);
+  assert.equal(__test.ADMIN_PAGE.includes("confirm("), false);
+  assert.equal(__test.ADMIN_PAGE.includes("prompt("), false);
+  assert.equal(__test.VERSION, "0.2.0");
   assert.equal(__test.ADMIN_PAGE.includes("ADMIN_USERNAME"), true);
   assert.equal(__test.ADMIN_PAGE.includes("ADMIN_PASSWORD"), true);
   assert.equal(__test.LOGIN_PAGE.includes('value="admin"'), false);
@@ -137,6 +146,16 @@ test("scheduled catalog selection excludes disabled upstreams", async () => {
   assert.match(sql, /WHERE active=1/);
 });
 
+test("cron skips upstreams that have no selected products", async () => {
+  let sql = "";
+  const DB = { prepare(query) { sql = query; return { async all() { return { results: [] }; } }; } };
+  assert.deepEqual(await __test.catalogConnectionsWithSelections({ DB }), []);
+  assert.match(sql, /c\.active=1/);
+  assert.match(sql, /m\.published=1/);
+  assert.match(sql, /m\.available=1/);
+  assert.match(sql, /EXISTS/);
+});
+
 test("catalog sync skips unchanged mappings and writes only real changes", () => {
   const item = { upstream_code: "CODE-1", upstream_race: "", snapshot: { name: "商品", cost_price: "10.00", price: "12.00", stock: 8 } };
   const snapshot_json = JSON.stringify(item.snapshot);
@@ -167,6 +186,24 @@ test("external URLs require safe HTTPS hosts and the standard port", () => {
   assert.throws(() => __test.externalUrl("https://127.0.0.1/callback"), /PRIVATE_HOST/);
   assert.throws(() => __test.externalUrl("https://user:pass@shop.example.com/callback"), /URL_CREDENTIALS_DENIED/);
   assert.throws(() => __test.externalUrl("https://shop.example.com:8443/callback"), /HTTPS_PORT_REQUIRED/);
+});
+
+test("optional upstream host allowlist blocks every unlisted host", () => {
+  const env = { UPSTREAM_ALLOWED_HOSTS: "api.example.com, shop.example.net" };
+  assert.equal(__test.assertUpstreamHost(env, new URL("https://api.example.com")).hostname, "api.example.com");
+  assert.throws(() => __test.assertUpstreamHost(env, new URL("https://other.example.com")), /UPSTREAM_HOST_NOT_ALLOWED/);
+  assert.doesNotThrow(() => __test.assertUpstreamHost({}, new URL("https://other.example.com")));
+});
+
+test("CSV export neutralizes spreadsheet formulas", () => {
+  assert.equal(__test.csvCell("=HYPERLINK(\"https://bad.example\")"), '"\'=HYPERLINK(""https://bad.example"")"');
+  assert.equal(__test.csvCell("normal"), '"normal"');
+});
+
+test("blank monetary values are unknown rather than zero", () => {
+  assert.equal(__test.moneyValue(""), null);
+  assert.equal(__test.moneyValue("  "), null);
+  assert.equal(__test.moneyValue("0"), 0);
 });
 
 test("login and admin are separate routes", async () => {
@@ -299,7 +336,7 @@ test("Dujiao-Next SKU display prefers human specification values over SKU codes"
   assert.equal(__test.nextSkuDisplayName({ sku_code: "SKU-5", spec_values: {} }), "SKU-5");
 });
 
-test("automatic schema upgrade adds selection columns before creating their index", async () => {
+test("safe schema bootstrap adds selection columns without rebuilding order tables", async () => {
   const events = [];
   let hasColumns = false;
   let rebuiltOrders = false;
@@ -334,7 +371,29 @@ test("automatic schema upgrade adds selection columns before creating their inde
   const availableColumnAt = events.findIndex(sql => sql.startsWith("ALTER TABLE product_mappings ADD COLUMN available"));
   assert.ok(availableColumnAt >= 0);
   assert.ok(selectionIndexAt > availableColumnAt);
-  assert.equal(rebuiltOrders, true);
+  assert.equal(rebuiltOrders, false);
+});
+
+test("production schema changes require migration 0006 instead of request-time ALTER", async () => {
+  const DB = {
+    prepare(sql) {
+      return {
+        async all() {
+          if (sql.includes("SELECT connection_id,submission_state")) throw new Error("no such column: connection_id");
+          return { results: [] };
+        },
+        async first() { return { name: "product_mappings_selection_idx" }; },
+        async run() { return { meta: { changes: 0 } }; },
+      };
+    },
+  };
+  await assert.rejects(__test.ensureSchema({ DB }), /DB_MIGRATION_REQUIRED_0006/);
+});
+
+test("migration 0006 is additive and contains the production safety fields", async () => {
+  const sql = await readFile(new URL("../migrations/0006_production_safety_and_operations.sql", import.meta.url), "utf8");
+  for (const field of ["connection_id", "submission_state", "upstream_cost", "sync_interval_minutes", "balance_currency"]) assert.equal(sql.includes(field), true);
+  assert.equal(/DROP\s+TABLE/i.test(sql), false);
 });
 
 test("public ACG catalog fallback groups products and requires a private trade code", () => {

@@ -6,3 +6,6 @@ MASTER_KEY=replace-with-at-least-32-random-characters
 
 # 本地调试时 Worker 的公开地址；线上通常可在后台“基本设置”中填写。
 PUBLIC_BASE_URL=http://localhost:8787
+
+# 可选：生产环境限制 Worker 只能访问这些上游主机，多个主机用逗号分隔。
+UPSTREAM_ALLOWED_HOSTS=upstream-a.example.com,upstream-b.example.com

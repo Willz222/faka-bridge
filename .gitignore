@@ -8,4 +8,5 @@ dist/
 *.zip
 release/faka-bridge-worker-v*.txt
 !release/faka-bridge-worker-v0.1.0.txt
+!release/faka-bridge-worker-v0.2.0.txt
 acg-plugin/app/Plugin/NextBridge/Config/Config.php

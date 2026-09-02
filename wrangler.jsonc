@@ -9,7 +9,7 @@
   },
   "vars": {
     "APP_NAME": "Faka Bridge",
-    "APP_VERSION": "0.1.0",
+    "APP_VERSION": "0.2.0",
     "SESSION_TTL_SECONDS": "28800"
   },
   "d1_databases": [
@@ -26,6 +26,14 @@
       "namespace_id": "5001",
       "simple": {
         "limit": 180,
+        "period": 60
+      }
+    },
+    {
+      "name": "ORDER_RATE_LIMITER",
+      "namespace_id": "5002",
+      "simple": {
+        "limit": 30,
         "period": 60
       }
     }
