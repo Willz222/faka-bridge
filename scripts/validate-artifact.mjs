@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workerPath = resolve(projectRoot, "dist/worker/index.js");
 const wranglerPath = resolve(projectRoot, "dist/wrangler.jsonc");
-const migrationPath = resolve(projectRoot, "dist/migrations/0006_production_safety_and_operations.sql");
+const migrationPath = resolve(projectRoot, "dist/migrations/0007_v030_reliability.sql");
 
 const [source, wrangler, migration] = await Promise.all([
   readFile(workerPath, "utf8"),
@@ -14,9 +14,8 @@ const [source, wrangler, migration] = await Promise.all([
   readFile(migrationPath, "utf8"),
 ]);
 JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, ""));
-assert.match(migration, /ADD COLUMN connection_id/);
-assert.match(migration, /ADD COLUMN submission_state/);
-assert.match(migration, /ADD COLUMN sync_interval_minutes/);
+assert.match(migration, /opaque_id_registry/);
+assert.match(migration, /bridge_orders_submission_idx/);
 assert.doesNotMatch(migration, /DROP\s+TABLE/i);
 
 // A data URL forces ESM parsing even though the generated output has no package.json.
@@ -27,7 +26,7 @@ assert.equal(
   "function",
   `${pathToFileURL(workerPath)} must export default.fetch`,
 );
-assert.equal(workerModule.__test.VERSION, "0.2.0");
+assert.equal(workerModule.__test.VERSION, "0.3.0");
 assert.equal(workerModule.__test.orderDirectionForMapping("next", { direction: "acg_to_next" }), "next_to_next");
 assert.equal(workerModule.__test.orderDirectionForMapping("acg", { direction: "next_to_acg" }), "acg_to_acg");
 assert.equal(workerModule.__test.ADMIN_PAGE.includes("强制刷新完整商品库"), true);

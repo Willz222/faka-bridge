@@ -14,7 +14,7 @@
 | 异次元 | Dujiao-Next | ✅ | ✅ | ✅ | ✅ |
 | 异次元 | 异次元 | ✅ | ✅ | ✅ | ✅ |
 
-当前公开版本：`0.2.0`。它采用“单租户、多上游”模型：每个站长独立部署一套 Worker 和一套下游接入密钥，但可以在同一个后台添加多个异次元或 Dujiao-Next 上游。登录页与管理后台分离，管理后台采用浅色响应式界面。异次元共享 API 严格按官方文档执行：请求只提交 `app_id` 与 `sign`，`app_key` 仅在 Worker 内部生成签名，不发送给上游。
+当前公开版本：`0.3.0`。它采用“单租户、多上游”模型：每个站长独立部署一套 Worker 和一套下游接入密钥，但可以在同一个后台添加多个异次元或 Dujiao-Next 上游。登录页与管理后台分离，管理后台采用浅色响应式界面。异次元共享 API 严格按官方文档执行：请求只提交 `app_id` 与 `sign`，`app_key` 仅在 Worker 内部生成签名，不发送给上游。
 
 每个上游首次连接时读取一次完整候选目录，新发现商品默认不公开；管理员搜索并勾选需要上架的商品后，定时任务只刷新这些已勾选商品。未勾选的几百或几千个候选商品不会参与日常上游请求或商品写入。
 
@@ -38,7 +38,10 @@ Worker 后台只负责连接配置、定价、同步、订单监控、重查和�
 - 全局、单上游、单商品三级定价；支持百分比、固定金额、固定售价和最低售价。
 - Cron 每 2 分钟进行轻量调度；只有存在到期订单或失败回调时才请求上游订单接口。商品价格与库存按每个上游设置的间隔刷新，下单前仍会实时核价。
 - 上游提交结果不明确时进入“待人工核对”，系统不会自动重复购买；后台可接管已创建订单或确认未创建。
-- 订单按状态、方向、上游和单号筛选，支持 CSV 导出，并统计销售额、上游成本和毛利润。
+- 订单按状态、方向、上游和单号筛选，支持 CSV 导出，并按结算币种统计销售额、上游成本和毛利润。
+- 商品列表和订单列表使用服务端分页，避免商品与订单增长后拖慢后台首页。
+- 预占后未提交的超时订单会安全失败；已经提交但结果不明确的订单会自动转入待人工核对。
+- 商品临时刷新失败会保留最近缓存，连续失败三次后才临时下架，恢复后自动重新上架。
 - 上游余额检测、低余额 Telegram 提醒、运行环境就绪检查、脱敏配置导出和诊断报告。
 - 审计日志、回调事件、价格历史和发货密文按保留天数分批清理，防止 D1 长期膨胀。
 - Telegram 订单、价格变化、上游异常与恢复通知。
@@ -55,7 +58,7 @@ npm install
 npx wrangler d1 create faka-bridge-db
 ```
 
-把命令返回的 `database_id` 填入 `wrangler.jsonc`，然后初始化数据库。旧版升级也执行同一命令，它会依次应用尚未执行的迁移；`0005` 会保留全部历史订单并升级为四向订单结构，`0006` 会补充订单安全状态、固定上游归属、成本、余额和运维索引：
+把命令返回的 `database_id` 填入 `wrangler.jsonc`，然后初始化数据库。旧版升级也执行同一命令，它会依次应用尚未执行的迁移；`0005` 会保留全部历史订单并升级为四向订单结构，`0006` 会补充订单安全状态、固定上游归属、成本、余额和运维索引，`0007` 会增加公开 ID 防碰撞注册表和卡单恢复索引：
 
 ```bash
 npm run db:remote
@@ -74,7 +77,8 @@ npx wrangler secret put MASTER_KEY
 - `ADMIN_USERNAME`：可选环境变量；不设置时管理员账户默认为 `admin`，现有 `ADMIN_PASSWORD` 不变。
 - `SESSION_SECRET`：至少 32 位随机值。
 - `MASTER_KEY`：至少 32 位随机值；丢失后将无法解密已保存配置。
-- 可选变量 `UPSTREAM_ALLOWED_HOSTS`：用逗号分隔允许访问的上游主机，例如 `upstream-a.example.com,upstream-b.example.com`。启用后，后台不能新增白名单外的连接。
+- 生产环境建议配置变量 `UPSTREAM_ALLOWED_HOSTS`：用逗号分隔允许访问的上游主机，例如 `upstream-a.example.com,upstream-b.example.com`。启用后，后台不能新增白名单外的连接。
+- `SESSION_TTL_SECONDS`：后台登录有效期，默认 `28800` 秒；修改管理员账号或密码后，已有会话会立即失效。
 
 部署并访问后台：
 
@@ -88,12 +92,12 @@ npm run deploy
 
 如果不使用命令行，可以直接部署单文件版本：
 
-1. 在 Cloudflare 创建 Worker，并把 [`release/faka-bridge-worker-v0.2.0.txt`](release/faka-bridge-worker-v0.2.0.txt) 的全部内容复制到代码编辑器。
+1. 在 Cloudflare 创建 Worker，并把 [`release/faka-bridge-worker-v0.3.0.txt`](release/faka-bridge-worker-v0.3.0.txt) 的全部内容复制到代码编辑器。
 2. 在 Worker 的“绑定”中添加 D1 数据库绑定，变量名必须是 `DB`。
-3. 新建 D1 数据库后，在 D1 控制台按编号顺序执行 `migrations/0001` 到 `0006`；从 `0.1.0` 升级只执行 `migrations/0006_production_safety_and_operations.sql`。绝对不要重复执行同一个 `ALTER TABLE`。
+3. 新建 D1 数据库后，在 D1 控制台按编号顺序执行 `migrations/0001` 到 `0007`；从 `0.2.0` 升级只执行 `migrations/0007_v030_reliability.sql`。绝对不要重复执行带有 `ALTER TABLE` 的旧迁移。
 4. 在 Worker“变量和机密”中添加 `ADMIN_USERNAME`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`MASTER_KEY`。其中后三项必须设为加密机密；`ADMIN_PASSWORD` 至少 12 位，另外两个至少 32 位。
 5. 添加 Cron 触发器 `*/2 * * * *`，然后部署 Worker。
-6. 打开 `/health`，确认返回 `ok: true` 且版本为 `0.2.0`；再打开 `/health/ready` 确认数据库和必要变量均为 ready，最后访问 `/login`。
+6. 打开 `/health`，确认返回 `ok: true` 且版本为 `0.3.0`；再登录后台执行“检查运行环境”，确认数据库和必要变量正常。
 
 ## 后台配置顺序
 
@@ -220,6 +224,7 @@ migrations/0003_*.sql          API 限流与后台任务原子锁
 migrations/0004_*.sql          Next 商品分页缓存与跨来源幂等
 migrations/0005_*.sql          勾选上架目录与四向订单结构
 migrations/0006_*.sql          提交状态、订单归属、成本、余额与运维索引
+migrations/0007_*.sql          公开 ID 防碰撞注册表与卡单恢复索引
 acg-plugin/                    异次元回调插件
 tests/core.test.mjs            签名与脱敏测试
 wrangler.jsonc                 Cloudflare 配置

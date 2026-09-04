@@ -9,7 +9,7 @@
   },
   "vars": {
     "APP_NAME": "Faka Bridge",
-    "APP_VERSION": "0.2.0",
+    "APP_VERSION": "0.3.0",
     "SESSION_TTL_SECONDS": "28800"
   },
   "d1_databases": [

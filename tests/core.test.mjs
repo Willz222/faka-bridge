@@ -65,7 +65,7 @@ test("embedded admin client is valid JavaScript", () => {
   assert.equal(__test.ADMIN_PAGE.includes("已上架商品刷新间隔"), true);
   assert.equal(__test.ADMIN_PAGE.includes("confirm("), false);
   assert.equal(__test.ADMIN_PAGE.includes("prompt("), false);
-  assert.equal(__test.VERSION, "0.2.0");
+  assert.equal(__test.VERSION, "0.3.0");
   assert.equal(__test.ADMIN_PAGE.includes("ADMIN_USERNAME"), true);
   assert.equal(__test.ADMIN_PAGE.includes("ADMIN_PASSWORD"), true);
   assert.equal(__test.LOGIN_PAGE.includes('value="admin"'), false);
@@ -77,6 +77,9 @@ test("embedded admin client is valid JavaScript", () => {
   assert.equal(__test.ADMIN_PAGE.includes('id="productSearch"'), true);
   assert.equal(__test.ADMIN_PAGE.includes('id="upstreamFilter"'), true);
   assert.equal(__test.ADMIN_PAGE.includes('id="categoryFilter"'), true);
+  assert.equal(__test.ADMIN_PAGE.includes('id="productPrev"'), true);
+  assert.equal(__test.ADMIN_PAGE.includes('id="productNext"'), true);
+  assert.equal(__test.ADMIN_PAGE.includes('/admin/api/products?'), true);
   assert.equal(__test.ADMIN_PAGE.includes("table-layout:fixed"), true);
   assert.equal(__test.ADMIN_PAGE.includes('id="price_protection_enabled"'), false);
   assert.equal(__test.ADMIN_PAGE.includes('name="price_protection_enabled"'), true);
@@ -87,6 +90,32 @@ test("embedded admin client is valid JavaScript", () => {
   assert.equal(__test.ADMIN_PAGE.includes("正在后台刷新已勾选商品"), true);
   assert.equal(__test.ADMIN_PAGE.includes("异次元 → 异次元"), true);
   assert.equal(/\b(?:confirm|prompt|alert)\s*\(/.test(__test.ADMIN_PAGE), false);
+});
+
+test("fresh installs expose the same safe price-protection defaults as the backend", () => {
+  assert.equal(__test.CONFIG_DEFAULTS.price_protection_enabled, "1");
+  assert.equal(__test.CONFIG_DEFAULTS.price_max_increase_percent, "0");
+  assert.equal(__test.CONFIG_DEFAULTS.price_quote_ttl_seconds, "30");
+  assert.equal(__test.ADMIN_PAGE.includes('name="price_protection_enabled" type="checkbox" value="1" checked'), true);
+});
+
+test("public optional settings can be cleared while blank secrets remain unchanged", async () => {
+  const source = await readFile(new URL("../worker/index.js", import.meta.url), "utf8");
+  assert.match(source, /for\(const key of PUBLIC_CONFIG\).*setSetting\(env,key,value,false\)/s);
+  assert.match(source, /for\(const key of SECRET_KEYS\).*data\[key\]===""\)continue/s);
+});
+
+test("Telegram test reports the real delivery failure", async () => {
+  const settings = { telegram_bot_token: "token", telegram_chat_id: "chat" };
+  const DB = { prepare() { return { args: [], bind(...args) { this.args=args; return this; }, async all() { return { results: this.args.map(key => settings[key] ? { key, value: settings[key], secret: 0 } : null).filter(Boolean) }; } }; } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("denied", { status: 403 });
+  try {
+    const result = await __test.notifyTelegram({ DB }, "health", "test", { force: true });
+    assert.deepEqual(result, { ok: false, error: "TELEGRAM_HTTP_403" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("pricing supports percentage, fixed addition, fixed sale price and floor", () => {
@@ -156,6 +185,18 @@ test("cron skips upstreams that have no selected products", async () => {
   assert.match(sql, /EXISTS/);
 });
 
+test("admin products use server-side pagination and connection-scoped queries", async () => {
+  const calls = [];
+  const DB = { prepare(sql) { const statement={ sql, args: [], bind(...args) { this.args=args; calls.push(this); return this; }, async first() { if (sql==="SELECT * FROM upstream_connections WHERE id=?") return { id: 7, platform: "next", active: 1 }; if (sql.startsWith("SELECT COUNT(*)")) return { total: 250 }; return null; }, async all() { if (sql.includes("SELECT id,direction,public_product_id")) return { results: [{ id: 1, direction: "acg_to_next", public_product_id: "101", public_sku_id: "201", upstream_product_id: "7:9", snapshot_json: '{"name":"商品","connection_id":7}', published: 1, available: 1, active: 1 }] }; if (sql.includes("SELECT DISTINCT")) return { results: [{ name: "软件" }] }; return { results: [] }; } }; return statement; } };
+  const result = await __test.adminProductPage({ DB }, new URLSearchParams({ connection_id: "7", page: "2", page_size: "100" }));
+  assert.equal(result.total, 250);
+  assert.equal(result.page, 2);
+  assert.equal(result.items.length, 1);
+  const pageQuery = calls.find(call => call.sql.includes("ORDER BY id DESC LIMIT ? OFFSET ?"));
+  assert.match(pageQuery.sql, /upstream_product_id LIKE/);
+  assert.deepEqual(pageQuery.args.slice(-2), [100, 100]);
+});
+
 test("catalog sync skips unchanged mappings and writes only real changes", () => {
   const item = { upstream_code: "CODE-1", upstream_race: "", snapshot: { name: "商品", cost_price: "10.00", price: "12.00", stock: 8 } };
   const snapshot_json = JSON.stringify(item.snapshot);
@@ -174,6 +215,31 @@ test("delivered content is immutable after the first successful fulfillment", as
   const DB = { prepare(sql) { return { bind() { return this; }, async first() { return sql.includes("SELECT delivery_hash") ? { delivery_hash: "already-delivered-with-another-hash", status: "delivered" } : null; }, async run() { if (sql.includes("SET status='delivered'")) deliveryUpdates++; return { meta: { changes: 1 } }; } }; } };
   await assert.rejects(__test.deliver({ DB }, { id: "order-1" }, "DIFFERENT-CARD"), /DELIVERY_CONFLICT/);
   assert.equal(deliveryUpdates, 0);
+});
+
+test("delivery keeps a recorded actual-cost anomaly", async () => {
+  const source = await readFile(new URL("../worker/index.js", import.meta.url), "utf8");
+  assert.match(source, /reconciliation_note=CASE WHEN reconciliation_note='ACTUAL_COST_EXCEEDED_GUARD' THEN reconciliation_note ELSE '' END/);
+});
+
+test("stale order recovery fails safe reservations and escalates uncertain submissions", async () => {
+  const updates = [];
+  const DB = { prepare(sql) { return { args: [], bind(...args) { this.args=args; return this; }, async run() { updates.push({ sql, args: this.args }); if (sql.includes("submission_state='reserved'")) return { meta: { changes: 1 } }; if (sql.includes("submission_state='submitting'")) return { meta: { changes: 1 } }; return { meta: { changes: 1 } }; }, async all() { return { results: [] }; } }; } };
+  const result = await __test.recoverStaleSubmissions({ DB }, "2026-09-04T12:00:00.000Z");
+  assert.deepEqual(result, { failed: 1, unknown: 1 });
+  assert.equal(updates.some(entry => entry.sql.includes("RESERVATION_EXPIRED_BEFORE_SUBMIT")), true);
+  assert.equal(updates.some(entry => entry.sql.includes("SUBMISSION_RESULT_UNCERTAIN")), true);
+  assert.equal(updates[0].args.at(-1), "2026-09-04T11:55:00.000Z");
+  assert.equal(updates[1].args.at(-1), "2026-09-04T11:50:00.000Z");
+});
+
+test("a selected product is only deactivated after three consecutive refresh failures", async () => {
+  const row = { id: 1, active: 1, snapshot_json: "{}" };
+  const DB = { prepare() { return { args: [], bind(...args) { this.args=args; return this; }, async run() { row.snapshot_json=this.args[0]; if (this.args[1]===1) row.active=0; return { meta: { changes: 1 } }; } }; } };
+  assert.deepEqual(await __test.markMappingSyncFailure({ DB }, row), { failures: 1, deactivate: false });
+  assert.deepEqual(await __test.markMappingSyncFailure({ DB }, row), { failures: 2, deactivate: false });
+  assert.deepEqual(await __test.markMappingSyncFailure({ DB }, row), { failures: 3, deactivate: true });
+  assert.equal(row.active, 0);
 });
 
 test("ACG form parser rejects prototype-pollution fields", () => {
@@ -214,6 +280,21 @@ test("login and admin are separate routes", async () => {
   const login = await worker.fetch(new Request("https://bridge.example/login"), { DB }, {});
   assert.equal(login.status, 200);
   assert.equal((await login.text()).includes("管理员账户"), true);
+});
+
+test("session TTL uses configuration with safe bounds", () => {
+  assert.equal(__test.sessionTtlSeconds({}), 28800);
+  assert.equal(__test.sessionTtlSeconds({ SESSION_TTL_SECONDS: "60" }), 900);
+  assert.equal(__test.sessionTtlSeconds({ SESSION_TTL_SECONDS: "999999" }), 86400);
+});
+
+test("public readiness does not expose secret environment variable names", async () => {
+  const DB = { prepare(sql) { return { async all() { return { results: [] }; }, async first() { return sql.includes("product_mappings_selection_idx") ? { name: "product_mappings_selection_idx" } : null; }, async run() { return { meta: { changes: 0 } }; } }; } };
+  const response = await worker.fetch(new Request("https://bridge.example/health/ready"), { DB }, {});
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal("missing" in body, false);
+  assert.equal(JSON.stringify(body).includes("MASTER_KEY"), false);
 });
 
 test("Dujiao-Next product output follows numeric Open API structure", () => {
@@ -277,6 +358,7 @@ test("ACG catalog gets stable opaque IDs and sanitized public snapshots", async 
 
 test("catalog pricing rules are loaded once per upstream instead of once per product", async () => {
   let ruleQueries = 0;
+  const registry = new Map();
   const settings = {
     global_markup_mode: "percent",
     global_markup_value: "10",
@@ -288,6 +370,7 @@ test("catalog pricing rules are loaded once per upstream instead of once per pro
         args: [],
         bind(...args) { this.args = args; return this; },
         async first() {
+          if (sql.includes("FROM opaque_id_registry")) return registry.has(this.args[0]) ? { public_id: registry.get(this.args[0]) } : null;
           if (!sql.includes("FROM settings")) return null;
           const value = settings[this.args[0]];
           return value === undefined ? null : { value, secret: 0 };
@@ -296,6 +379,10 @@ test("catalog pricing rules are loaded once per upstream instead of once per pro
           if (sql.includes("FROM settings")) return { results: this.args.map(key => settings[key] === undefined ? null : { key, value: settings[key], secret: 0 }).filter(Boolean) };
           if (sql.includes("FROM price_rules")) ruleQueries++;
           return { results: [] };
+        },
+        async run() {
+          if (sql.startsWith("INSERT OR IGNORE INTO opaque_id_registry") && !registry.has(this.args[0]) && ![...registry.values()].includes(this.args[1])) registry.set(this.args[0], this.args[1]);
+          return { meta: { changes: 1 } };
         },
       };
     },
@@ -315,7 +402,8 @@ test("catalog pricing rules are loaded once per upstream instead of once per pro
 
 test("Dujiao-Next catalog is normalized for ACG downstream with opaque IDs and pricing", async () => {
   const settings = { global_markup_mode: "fixed", global_markup_value: "2", global_min_price: "0" };
-  const DB = { prepare(sql) { return { args: [], bind(...args) { this.args=args; return this; }, async first() { if (!sql.includes("FROM settings")) return null; const value=settings[this.args[0]]; return value===undefined?null:{value,secret:0}; }, async all() { if (sql.includes("FROM settings")) return { results: this.args.map(key => settings[key] === undefined ? null : { key, value: settings[key], secret: 0 }).filter(Boolean) }; return {results:[]}; } }; } };
+  const registry = new Map();
+  const DB = { prepare(sql) { return { args: [], bind(...args) { this.args=args; return this; }, async first() { if (sql.includes("FROM opaque_id_registry")) return registry.has(this.args[0]) ? { public_id: registry.get(this.args[0]) } : null; if (!sql.includes("FROM settings")) return null; const value=settings[this.args[0]]; return value===undefined?null:{value,secret:0}; }, async all() { if (sql.includes("FROM settings")) return { results: this.args.map(key => settings[key] === undefined ? null : { key, value: settings[key], secret: 0 }).filter(Boolean) }; return {results:[]}; }, async run() { if (sql.startsWith("INSERT OR IGNORE INTO opaque_id_registry") && !registry.has(this.args[0]) && ![...registry.values()].includes(this.args[1])) registry.set(this.args[0],this.args[1]); return {meta:{changes:1}}; } }; } };
   const rows = await __test.normalizeNextCatalog({ DB, MASTER_KEY: "test-master-key-that-is-longer-than-32-bytes" }, {
     categories: [{ id: 3, name: { "zh-CN": "软件" } }],
     items: [{ id: 9, category_id: 3, title: { "zh-CN": "Next 商品" }, price_amount: "10.00", skus: [{ id: 91, sku_code: "一年", price_amount: "10.00", stock_quantity: 7, is_active: true }], is_active: true }],
@@ -394,6 +482,25 @@ test("migration 0006 is additive and contains the production safety fields", asy
   const sql = await readFile(new URL("../migrations/0006_production_safety_and_operations.sql", import.meta.url), "utf8");
   for (const field of ["connection_id", "submission_state", "upstream_cost", "sync_interval_minutes", "balance_currency"]) assert.equal(sql.includes(field), true);
   assert.equal(/DROP\s+TABLE/i.test(sql), false);
+});
+
+test("migration 0007 adds collision-safe IDs and the stale-submission index", async () => {
+  const sql = await readFile(new URL("../migrations/0007_v030_reliability.sql", import.meta.url), "utf8");
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS opaque_id_registry/);
+  assert.match(sql, /public_id TEXT NOT NULL UNIQUE/);
+  assert.match(sql, /bridge_orders_submission_idx/);
+  assert.equal(/DROP\s+TABLE/i.test(sql), false);
+});
+
+test("opaque IDs deterministically re-salt when a generated ID is already owned", async () => {
+  const master = "test-master-key-that-is-longer-than-32-bytes";
+  const occupied = await __test.distinctOpaqueUint({ MASTER_KEY: master }, "route:product:one", "1");
+  const byLabel = new Map([["existing-owner", occupied]]), byId = new Map([[occupied, "existing-owner"]]);
+  const DB = { prepare(sql) { return { args: [], bind(...args) { this.args=args; return this; }, async first() { if (sql.includes("WHERE label=?")) return byLabel.has(this.args[0]) ? { public_id: byLabel.get(this.args[0]) } : null; return null; }, async run() { const [label,publicId]=this.args; if (!byLabel.has(label)&&!byId.has(publicId)) { byLabel.set(label,publicId); byId.set(publicId,label); } return { meta: { changes: 1 } }; } }; } };
+  const first = await __test.distinctOpaqueUint({ DB, MASTER_KEY: master }, "route:product:one", "1");
+  const second = await __test.distinctOpaqueUint({ DB, MASTER_KEY: master }, "route:product:one", "1");
+  assert.notEqual(first, occupied);
+  assert.equal(second, first);
 });
 
 test("public ACG catalog fallback groups products and requires a private trade code", () => {

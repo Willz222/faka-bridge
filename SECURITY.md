@@ -14,10 +14,12 @@ Please do not publish credentials, delivery contents, customer information, or a
 - Put Cloudflare Access or an equivalent identity gate in front of `/admin*`.
 - Use HTTPS for every upstream and callback endpoint.
 - Use exact downstream callback host allowlists; do not add wildcards.
-- Configure `UPSTREAM_ALLOWED_HOSTS` in production when the upstream host list is stable.
+- Configure `UPSTREAM_ALLOWED_HOSTS` in production and list every allowed upstream host explicitly.
 - Configure the `ORDER_RATE_LIMITER` binding for global order throttling; direct single-file deployments fall back to D1.
 - Keep the异次元 server clock synchronized and protect the callback plugin files from modification.
 - Rotate bridge credentials after suspected exposure. Rotation invalidates the previous credential immediately.
+- Changing `ADMIN_USERNAME` or `ADMIN_PASSWORD` invalidates existing administrator sessions; keep `SESSION_TTL_SECONDS` at one day or less.
+- Enable HSTS for the Worker custom domain in Cloudflare and keep the management routes behind Cloudflare Access.
 - Do not log request bodies on API or callback routes at the reverse proxy layer.
 - Keep bidirectional price protection enabled. A live quote failure or a cost above the configured safe limit must block the order instead of falling back to a stale cache.
 - Apply every database migration before deployment. Open `/health/ready` after deployment and do not accept orders until it returns `ok: true`.
